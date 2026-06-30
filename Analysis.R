@@ -17,15 +17,15 @@ Full_df <- read.csv("Full_Dataset.csv",
 # Libraries
 library(car)
 library(corrplot)
-library(corrr)
 library(dplyr)
 library(ggplot2)
 library(janitor)
+library(mgcv)
 library(tidyverse)
 library(visdat) 
 
 
-# Cleaning ----------------------------------------------------------------
+# Data Cleaning ----------------------------------------------------------------
 
 
 # Clean the names
@@ -63,42 +63,13 @@ Full_df <- Full_df %>%
     floor_area_ratio_buildings_area_new = floor_area_ratio_buildings_area_square_foot_new_building
   )
 
-# Create lags for the urban development
-Full_df <- Full_df %>%
-  arrange(year) %>%
-  mutate(
-    # --- 1-YEAR LAG ---
-    across(
-      .cols = c(
-        contains("modifications"),
-        contains("private_villa_area_square_foot_new_building"),
-        contains("investment_villa_area_square_foot_new_building")
-      ),
-      .fns = ~lag(.x, 1),
-      .names = "{.col}_lagged"
-    ),
-    
-    # --- 2-YEAR LAG ---
-    across(
-      .cols = c(
-        contains("multi_storey_buildings_area_square_foot_new_building"), 
-        contains("floor_area_ratio_buildings_area_square_foot_new_building"),
-        contains("industrial_buildings_area_square_foot_new_building"),
-        contains("public_buildings_area_square_foot_new_building"),
-        contains("commercial_buildings_area_square_foot_new_building")
-      ),
-      .fns = ~lag(.x, 2),
-      .names = "{.col}_lagged"
-    )
-  ) %>%
-  # --- THE NEW TOTAL ---
-  mutate(
-    total_area_impact = rowSums(select(., ends_with("_lagged")), na.rm = TRUE)
-  )
-
 # Check for missing values
 vis_miss(Full_df) + 
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Fix the government NA entries by assuming 0 activity
+Full_df$floor_area_ratio_buildings_area_new[is.na(Full_df$floor_area_ratio_buildings_area_new)] <- 0
+Full_df$floor_area_ratio_buildings_area_modifications[is.na(Full_df$floor_area_ratio_buildings_area_modifications)] <- 0
 
 # Build the model using only rows that ARE NOT missing data
 temp_model <- lm(total_system_requirement_groundwater ~ residential_quantity_consumed + commercial_quantity_consumed + industrial_quantity_consumed + other_quantity_consumed, 
@@ -121,53 +92,49 @@ Full_df$total_system_requirement[missing_rows] <-
 # Cleanup
 rm(temp_model, missing_rows)
 
+# Create lags for the urban development
+Full_df <- Full_df %>%
+  arrange(year) %>%
+  mutate(
+    # --- 1-YEAR LAG ---
+    across(
+      .cols = c(
+        contains("modifications"),
+        contains("private_villa_area_new"),
+        contains("investment_villa_area_new")
+      ),
+      .fns = ~lag(.x, 1),
+      .names = "{.col}_lagged"
+    ),
+    
+    # --- 2-YEAR LAG ---
+    across(
+      .cols = c(
+        contains("multi_storey_buildings_area_new"), 
+        contains("floor_area_ratio_buildings_area_new"),
+        contains("industrial_buildings_area_new"),
+        contains("public_buildings_area_new"),
+        contains("commercial_buildings_area_new")
+      ),
+      .fns = ~lag(.x, 2),
+      .names = "{.col}_lagged"
+    )
+  ) %>%
+  # --- THE NEW TOTAL ---
+  mutate(
+    total_area_new_building_lagged = rowSums(select(., ends_with("_new_lagged")), na.rm = TRUE),
+    total_area_additions_and_amendments_lagged = rowSums(select(., ends_with("_modifications_lagged")), na.rm = TRUE),
+    total_area_impact = rowSums(select(., ends_with("_lagged")), na.rm = TRUE)
+  )
+
+# Create a new dataframe to store only the values of the study
+Full_df <- Full_df[Full_df$year >= 2015 & Full_df$year <= 2023, ]
+
 # Look at the df summary
 summary(Full_df)
 
-# Transform the data
-Full_df <- Full_df %>%
-  mutate(across(
-    .cols = where(is.numeric) & !all_of(c("year")),
-    .fns = ~ asinh(.x), 
-    .names = "trans_{.col}"
-  ))
-
-qqnorm(Full_df$trans_total_quantity_consumed)
-qqline(Full_df$trans_total_quantity_consumed, col = "red")
-
-# Set your transformed target
-target_var <- "trans_total_quantity_consumed"
-
-# Identify predictors: Only those starting with 'trans_' OR 'year'
-# But remove the target itself so you don't plot it against itself
-plot_vars <- names(Full_df)[grepl("^trans_|year", names(Full_df))]
-plot_vars <- setdiff(plot_vars, target_var)
-
-# Run the loop
-for (v in plot_vars) {
-  p <- ggplot(Full_df, aes(x = .data[[v]], y = .data[[target_var]])) +
-    geom_point(alpha = 0.6, color = "midnightblue") +
-    geom_smooth(method = "lm", color = "blue", se = TRUE) +   
-    geom_smooth(method = "loess", color = "red", se = FALSE, linetype = "dashed") + 
-    labs(
-      title = paste("Linearity Check: ", v, "vs", target_var),
-      subtitle = "Closer Red/Blue lines indicate better fit for Linear Regression",
-      x = v,
-      y = "Transformed Consumption"
-    ) +
-    theme_minimal()
-  
-  print(p)
-  Sys.sleep(0.3) # Slightly faster sleep
-}
-# Some red lines are relatively straight, others are pretty wavy. The year plot line is also relatively straight and increasing over time.
-
-# Check for normality
-shapiro.test(Full_df$trans_total_quantity_consumed)
-# The normality assumption is violated
-
 # Create a new dataframe to store only the values of the study
-df_wide <- Full_df[Full_df$year >= 2015 & Full_df$year <= 2023, ]
+df_wide <- Full_df
 
 head(df_wide)
 
@@ -198,31 +165,40 @@ df_long <- df_long %>%
 
 # Time Series of Consumption
 ggplot(df_wide, aes(x = year, y = total_quantity_consumed)) +
-  geom_line() +
-  geom_point() +
-  labs(title = "Annual Consumption Trend",
-       x = "Year",
-       y = "Total Quantity Consumed") +
-  theme_minimal()
+  geom_line(color = "blue") +
+  geom_point(color = "blue", size = 1) +
+  labs(
+    title = "Annual Total Water Consumption Trend in Dubai (2015–2023)",
+    x = "Year",
+    y = "Water Consumption (Million Imperial Gallons)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
 
 # Urban Expansion Plot
 ggplot(df_wide, aes(x = total_area_impact, y = total_quantity_consumed)) +
-  geom_point() +
-  geom_smooth(method = "lm", color = "firebrick") + 
-  labs(title = "Impact of Urban Expansion on Consumption",
-       x = "Total Area (Square Foot)",
-       y = "Total Quantity Consumed") +
-  theme_minimal()
-
+  geom_point(size = 2, alpha = 0.6) +
+  geom_smooth(method = "lm", color = "firebrick", se = TRUE) + 
+  labs(
+    title = "Impact of Total Lagged Urban Development on Total Water Consumption",
+    x = "Lagged Licensed Area (Square Foot)",
+    y = "Water Consumption (Million Imperial Gallons)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
 
 # Demographic Plot
 ggplot(df_wide, aes(x = total_population, y = total_quantity_consumed)) +
-  geom_point() +
-  geom_smooth(method = "lm", color = "orange") +
-  labs(title = "Demographic Drivers of Consumption",
-       x = "Total Population",
-       y = "Total Quantity Consumed") +
-  theme_minimal()
+  geom_point(size = 2, alpha = 0.6) +
+  geom_smooth(method = "lm", color = "orange", se = TRUE) + 
+  labs(
+    title = "Impact of Population Growth on Total Water Consumption",
+    x = "Number of Residents",
+    y = "Water Consumption (Million Imperial Gallons)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
 
 # Full graphs
 ggplot(df_long, aes(x = year, y = Value)) +
@@ -247,8 +223,8 @@ df_long %>%
                                 "non_emirati" = "red", 
                                 "total_population" = "black")) +
   theme_minimal() +
-  labs(title = "Population Dynamics (2015-2023)",
-       y = "Number of People",
+  labs(title = "Annual Population Trends by Nationality in Dubai (2015–2023)",
+       y = "Number of Residents",
        x = "Year",
        color = "Nationality") +
   theme(legend.position = "right")
@@ -262,8 +238,8 @@ df_long %>%
   geom_line(size = 1) +
   geom_point() +
   theme_minimal() +
-  labs(title = "Water Consumption Trends by Sector",
-       y = "Volume (Million Imperial Gallons)",
+  labs(title = "Total Water Consumption by Sector in Dubai (2015–2023)",
+       y = "Water Consumption (Million Imperial Gallons)",
        x = "Year",
        color = "Sector") +
   theme(legend.position = "right")
@@ -277,8 +253,8 @@ df_long %>%
   geom_line(size = 1) +
   geom_point() +
   theme_minimal() +
-  labs(title = "Construction Trends (New Buildings): Licensed Area by Sector",
-       y = "Total Area (Square Foot)",
+  labs(title = "Licensed New Building Construction Area by Sector in Dubai (2015–2023)",
+       y = " Licensed Area (Square Foot)",
        x = "Year",
        color = "Building Type") +
   theme(legend.position = "right")
@@ -291,8 +267,8 @@ df_long %>%
   geom_line(size = 1) +
   geom_point() +
   theme_minimal() +
-  labs(title = "Construction Trends (Modifications): Licensed Area by Sector",
-       y = "Total Area (Square Foot)",
+  labs(title = "Licensed Modifications Area by Sector in Dubai (2015–2023)",
+       y = " Licensed Area (Square Foot)",
        x = "Year",
        color = "Building Type") +
   theme(legend.position = "right")
@@ -304,7 +280,7 @@ df_long %>%
   geom_point() +
   theme_minimal() +
   labs(title = "Macro Construction Trends: New vs. Existing Buildings",
-       y = "Total Area (Square Foot)",
+       y = "Licensed Area (Square Foot)",
        x = "Year",
        color = "Permit Type") +
   theme(legend.position = "right")
@@ -318,7 +294,7 @@ df_long %>%
   geom_line(size = 1) +
   geom_point() +
   theme_minimal() +
-  labs(title = "Water Infrastructure: Capacity vs. Production",
+  labs(title = "Water Infrastructure Performance: Capacity, Production, and Consumption in Dubai (2015–2023)",
        y = "Volume (Million Imperial Gallons)",
        x = "Year",
        color = "Metric") + 
@@ -343,14 +319,14 @@ df_long %>%
   geom_histogram(aes(y = ..density..), position = "identity", alpha = 0.5) +
   geom_density(alpha = 0.2) +
   theme_minimal() +
-  labs(title = "New Buildings vs. Modifications",
-       x = "Area (Square Foot)",
+  labs(title = "Distribution of Licensed Construction Area",
+       x = "Licensed Area (Square Foot)",
        y = "Density")
 
 # Area Comparison (Combined New & Modifications)
 df_long %>%
   filter(grepl("_area_", Metric)) %>%
-  filter(!grepl("total|trans_", Metric)) %>%
+  filter(!grepl("total|_lagged", Metric)) %>%
   mutate(Category = if_else(grepl("new", Metric), "New Buildings", "Modifications")) %>%
   ggplot(aes(x = Metric, y = Value, fill = Category)) +
   geom_boxplot(outlier.size = 1, outlier.alpha = 0.5, outlier.color = "red") +
@@ -358,20 +334,20 @@ df_long %>%
   coord_flip() +
   theme_minimal() +
   theme(legend.position = "none") +
-  labs(title = "Building Area Outliers", 
+  labs(title = "Outlier Analysis: Licensed Building Area by Category", 
        x = "", 
-       y = "Square Feet")
+       y = "Licensed Area (Square Foot)")
 
 # Water Outliers
 df_long %>%
   filter(grepl("quantity_consumed|capacity|produced", Metric)) %>%
-  filter(!grepl("total|trans_", Metric)) %>%
+  filter(!grepl("total", Metric)) %>%
   ggplot(aes(x = Metric, y = Value)) +
   geom_boxplot(fill = "steelblue", outlier.color = "firebrick", outlier.shape = 1) +
   facet_wrap(~Metric, scales = "free", ncol = 3) +
   theme_minimal() +
   theme(legend.position = "none") +
-  labs(title = "Water Supply & Consumption Outliers", 
+  labs(title = "Outlier Analysis: Water Supply, Capacity, and Consumption", 
        x = "", 
        y = "Volume (Million Imperial Gallons)")
 
@@ -381,25 +357,107 @@ df_long %>%
   ggplot(aes(x = Metric, y = Value, fill = Metric)) +
   geom_boxplot() +
   theme_minimal() +
-  labs(title = "Outlier Detection: Population Segments",
+  labs(title = "Outlier Analysis: Population Segments by Nationality",
        x = "Nationality",
-       y = "Number of People")
+       y = "Number of Residents")
+
+
+# Define the base metrics
+all_construction_metrics <- c(theme_new, theme_modif)
+
+# Identify the already created lagged columns (assuming they end in '_lagged')
+all_lagged_metrics <- paste0(all_construction_metrics, "_lagged")
+
+# Create log-transformed columns for both original and lagged versions
+df_wide <- df_wide %>%
+  mutate(across(all_of(c(all_construction_metrics, all_lagged_metrics)), 
+                list(log = ~log(. + 1)), 
+                .names = "log_{.col}"))
+
+# Verification: Density plot of a sample variable
+ggplot(df_wide, aes(x = total_area_new_building)) + 
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  labs(title = "Original Distribution: Total New Building Area")
+
+ggplot(df_wide, aes(x = log_total_area_new_building)) + 
+  geom_density(fill = "darkgreen", alpha = 0.5) +
+  labs(title = "Log-Transformed Distribution: Total New Building Area")
+
+
+
+# Diagnosis ---------------------------------------------------------------
+
+## Define your full list of predictors (excluding Y)
+# We include the original themes and the transformed construction themes
+predictors <- names(df_wide %>% select(where(is.numeric), -year, -total_quantity_consumed))
+
+par(mfrow = c(3, 3)) 
+
+# Generate the Q-Q plots
+for (var in predictors) {
+  qqnorm(df_wide[[var]], main = paste("QQ:", var))
+  qqline(df_wide[[var]], col = "darkblue")
+}
+
+# Generate the Scatterplots
+for (var in predictors) {
+  if (var %in% names(df_wide)) {
+    plot(df_wide[[var]], df_wide$total_quantity_consumed,
+         main = paste("total_quantity_consumed vs", var),
+         xlab = var, ylab = "Water Consumption",
+         pch = 19, col = "grey50")
+    
+    # Adding a trend line to identify non-linear patterns
+    lines(lowess(df_wide[[var]], df_wide$total_quantity_consumed), 
+          col = "red", lwd = 2)
+  }
+}
+
+par(mfrow = c(1, 1))
 
 
 # Correlation -------------------------------------------------------------
 
 
-# Focus only on the transformed variables for the correlation
-trans_df <- df_wide %>% select(year, starts_with("trans_"))
+# Create the model_df by excluding the raw construction metrics
+corr_df <- df_wide
 
-# Create a correlation matrix
-cor_matrix <- cor(trans_df, use = "complete.obs")
+# Calculate Kendall's Tau Correlation Matrix
+kendall_matrix <- cor(corr_df, use = "complete.obs", method = "kendall")
 
 # Look specifically at what correlates with total consumption
-consumption_cor <- cor_matrix[, "trans_total_quantity_consumed"]
-sort(consumption_cor, decreasing = TRUE)
+kendall_consumption <- kendall_matrix[, "total_quantity_consumed"]
+sort(kendall_consumption, decreasing = TRUE)
 
-corrplot(cor_matrix, method = "color", order = "hclust", tl.cex = 0.5)
+# Perform the drop
+corr_df <- corr_df %>% 
+  select(-any_of(
+    c(all_construction_metrics, 
+      all_lagged_metrics, 
+      paste0("log_", all_construction_metrics)
+  )))
+
+# Calculate Kendall's Tau Correlation Matrix
+kendall_matrix <- cor(corr_df, use = "complete.obs", method = "kendall")
+
+# Look specifically at what correlates with total consumption
+kendall_consumption <- kendall_matrix[, "total_quantity_consumed"]
+sort(kendall_consumption, decreasing = TRUE)
+
+# Update the column names in your matrix
+colnames(kendall_matrix) <- gsub("log_|", "", colnames(kendall_matrix))
+colnames(kendall_matrix) <- gsub("_lagged", "", colnames(kendall_matrix))
+
+# Update the row names to match
+rownames(kendall_matrix) <- colnames(kendall_matrix)
+
+# Visualize with a heatmap
+corrplot(kendall_matrix, 
+         method = "color", 
+         order = "hclust", 
+         tl.cex = 0.4, 
+         title = "Correlation Matrix (Kendall's Tau)",
+         mar = c(0,0,1,0))
 
 
 # Trends ------------------------------------------------------------------
@@ -412,8 +470,9 @@ df_wide <- df_wide %>%
 ggplot(df_wide, aes(x = year, y = MIG_per_person)) +
   geom_line(color = "steelblue", size = 1) + 
   geom_point() +
-  labs(title = "Is the City becoming more efficient?", 
-       y = "Million Imperial Gallons per Capita") +
+  labs(title = "Annual Water Consumption per Capita", 
+       y = "Water Consumption (Million Imperial Gallons / Person)", 
+       x = "Year") +
   theme_minimal()
 
 # Feature engineering
@@ -449,8 +508,8 @@ ggplot(df_wide, aes(x = year)) +
   geom_line(aes(y = quantity_produced_yoy, color = "Water Production Growth"), size = 1) +
   geom_line(aes(y = total_capacity_yoy, color = "Water Capacity Growth"), size = 1) +
   #geom_line(aes(y = total_area_impact_yoy, color = "Licensed Areas Growth"), size = 1) +
-  labs(title = "Comparative Annual Growth Rates (YoY)",
-       y = "% Change YoY",
+  labs(title = "Year-over-Year (YoY) Growth Comparisons",
+       y = "Annual Percentage Change (%)",
        x = "Year",
        color = "Growth Metrics") +
   theme_minimal()
@@ -460,66 +519,86 @@ ggplot(df_wide, aes(x = year)) +
 # Modelling ----------------------------------------------------------------
 
 
-# Using the full dataframe
-model_df <- Full_df %>% 
-  dplyr::select(year, starts_with("trans_"))
+# Drop the redundancy (all the sums)
+model_df <- corr_df %>% 
+  select(-c(residential_quantity_consumed,
+            commercial_quantity_consumed,
+            industrial_quantity_consumed,
+            other_quantity_consumed,
+            total_population,
+            total_number_of_customer,
+            total_system_requirement,
+            total_capacity,
+            log_total_area_new_building_lagged,
+            log_total_area_additions_and_amendments_lagged,
+            total_area_impact,
+            total_area))
 
-model_df <- model_df %>%
-  dplyr::select(
-    -any_of(c("trans_total_population", 
-              "trans_quantity_produced", 
-              "trans_total_capacity", 
-              "trans_total_number_of_customer",
-              "trans_total_area_new_building",
-              "trans_total_area_additions_and_amendments",
-              "trans_total_area")))
+# Drop |cor| < 0.5   
+model_df <- model_df %>% 
+  select(-c(log_multi_storey_buildings_area_new_lagged,
+            log_floor_area_ratio_buildings_area_new_lagged,
+            log_private_villa_area_modifications_lagged,
+            total_system_requirement_groundwater,
+            log_public_buildings_area_modifications_lagged,
+            log_floor_area_ratio_buildings_area_modifications_lagged))
+
+# Drop |cor| = 1
+model_df <- model_df %>% 
+  select(-c(total_system_requirement_desalination_water_demand,
+            quantity_produced))
+
+# Drop multicollinearity with non_emirati
+model_df <- model_df %>% 
+  select(-c(year,
+            emirati,
+            residential_number_of_customer,
+            commercial_number_of_customer))
+vif(lm(non_emirati ~ industrial_number_of_customer + other_number_of_customer, data = model_df))
+
+# Drop multicollinearity with desalination_stations_capacity
+vif(lm(desalination_stations_capacity ~ wells_capacity  + log_public_buildings_area_new_lagged, data = model_df))
+model_df <- model_df %>% 
+  select(-c(wells_capacity,
+            log_public_buildings_area_new_lagged))
 
 # Create a clean version with no NA values
 model_df <- na.omit(model_df)
 
 # Create a correlation matrix
-cor_model <- cor(model_df, use = "complete.obs")
+cor_model <- cor(model_df, use = "complete.obs", method = "kendall")
 
 # Look specifically at what correlates with total consumption
-model_cor <- cor_model[, "trans_total_quantity_consumed"]
+model_cor <- cor_model[, "total_quantity_consumed"]
 sort(model_cor, decreasing = TRUE)
 
 corrplot(cor_model, method = "color", order = "hclust", tl.cex = 0.5)
 
 
 # The models
-exp_model <- lm(trans_total_quantity_consumed ~ 
-                    trans_non_emirati + 
-                    trans_investment_villa_area_new, 
-                  data = model_df)
-summary(exp_model)
-vif(exp_model)
-AIC(exp_model)
+model1 <- gam(total_quantity_consumed ~ s(non_emirati, k=3), 
+             data = model_df, method = "REML")
+summary(model1)
+AIC(model1)
 
-exp_model_1 <- lm(trans_total_quantity_consumed ~ 
-                    trans_non_emirati + 
-                    trans_investment_villa_area_new +
-                    trans_multi_storey_buildings_area_modifications_lagged ,
-                  data = model_df)
-summary(exp_model_1)
-vif(exp_model_1)
-AIC(exp_model_1)
+model2 <- gam(total_quantity_consumed ~ s(non_emirati, k=3) + s(log_investment_villa_area_modifications_lagged, k=3), 
+             data = model_df, method = "REML")
+summary(model2)
+AIC(model2)
 
-exp_model_2 <- lm(trans_total_quantity_consumed ~ 
-                    trans_non_emirati + 
-                    trans_multi_storey_buildings_area_modifications_lagged +
-                    trans_investment_villa_area_modifications_lagged,
-                  data = model_df)
-summary(exp_model_2)
-vif(exp_model_2)
-AIC(exp_model_2)
+model3 <- gam(total_quantity_consumed ~ s(non_emirati, k=3) + s(industrial_number_of_customer, k=3), 
+             data = model_df, method = "REML")
+summary(model3)
+AIC(model3)
 
-exp_model_3 <- lm(trans_total_quantity_consumed ~ 
-                    trans_non_emirati + 
-                    trans_multi_storey_buildings_area_modifications_lagged +
-                    trans_investment_villa_area_modifications_lagged +
-                    trans_total_area_impact,
-                  data = model_df)
-summary(exp_model_3)
-vif(exp_model_3)
-AIC(exp_model_3)
+model4 <- gam(total_quantity_consumed ~ s(non_emirati, k=3) + s(log_industrial_buildings_area_new_lagged, k=3), 
+             data = model_df, method = "REML")
+summary(model4)
+AIC(model4)
+
+model5 <- gam(total_quantity_consumed ~ s(non_emirati, k=3) + s(log_investment_villa_area_modifications_lagged, k=3) + s(log_industrial_buildings_area_new_lagged, k=3), 
+             data = model_df, method = "REML")
+summary(model5)
+AIC(model5)
+
+gam.check(model5)
